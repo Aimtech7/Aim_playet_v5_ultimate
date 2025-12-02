@@ -183,6 +183,39 @@ class FileInfoDialog(QDialog):
         layout.addWidget(close_btn)
         self.setLayout(layout)
 
+# new Settings dialog
+class SettingsDialog(QDialog):
+	def __init__(self, settings):
+		super().__init__()
+		self.setWindowTitle("Settings")
+		self.setGeometry(450,250,350,180)
+		self.settings = settings
+		l = QVBoxLayout(self)
+		# default volume
+		l.addWidget(QLabel("Default volume"))
+		self.vol = QSlider(Qt.Horizontal); self.vol.setRange(0,100); self.vol.setValue(self.settings.get("default_volume",80))
+		l.addWidget(self.vol)
+		# theme selection
+		l.addWidget(QLabel("Theme"))
+		from PyQt5.QtWidgets import QComboBox
+		self.theme = QComboBox(); self.theme.addItems(["light","dark"])
+		self.theme.setCurrentText(self.settings.get("theme","light"))
+		l.addWidget(self.theme)
+		# auto-hide controls
+		self.auto_hide_cb = QPushButton("Auto-hide controls in fullscreen: " + ("On" if self.settings.get("auto_hide", True) else "Off"))
+		self.auto_hide_cb.setCheckable(True)
+		self.auto_hide_cb.setChecked(self.settings.get("auto_hide", True))
+		self.auto_hide_cb.clicked.connect(lambda: self.auto_hide_cb.setText("Auto-hide controls in fullscreen: " + ("On" if self.auto_hide_cb.isChecked() else "Off")))
+		l.addWidget(self.auto_hide_cb)
+		# buttons
+		btns = QHBoxLayout()
+		ok = QPushButton("OK"); ok.clicked.connect(self.accept)
+		cancel = QPushButton("Cancel"); cancel.clicked.connect(self.reject)
+		btns.addWidget(ok); btns.addWidget(cancel)
+		l.addLayout(btns)
+	def get_values(self):
+		return {"default_volume": self.vol.value(), "theme": self.theme.currentText(), "auto_hide": self.auto_hide_cb.isChecked()}
+
 class AIMPlayer(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -201,6 +234,10 @@ class AIMPlayer(QMainWindow):
         # VLC player handles audio playback when available
         self.vlc_instance = vlc.Instance() if _HAS_VLC else None
         self.vlc_player = None
+        # Recent files tracking
+        self.recent_files = []  # list of recent file paths
+        self.recent_files_path = Path(__file__).parent / "recent_files.json"
+        self.load_recent_files()
         # Central video layout
         central = QWidget()
         self.setCentralWidget(central)
@@ -230,8 +267,8 @@ class AIMPlayer(QMainWindow):
         self.visualizer = VisualizerWidget(None)
         self.vlay.addWidget(self.visualizer)
         # Controls bar (play/pause, stop, seek, volume, speed)
-        ctrl = QWidget()
-        ctrl_layout = QHBoxLayout(ctrl)
+        self.ctrl = QWidget()  # replaced local ctrl variable with self.ctrl
+        self.ctrl_layout = QHBoxLayout(self.ctrl)
         self.play_btn = QPushButton("Play")
         self.stop_btn = QPushButton("Stop")
         self.prev_btn = QPushButton("◄◄")  # Previous
@@ -259,21 +296,21 @@ class AIMPlayer(QMainWindow):
         self.vol_slider.setRange(0,100)
         self.vol_slider.setValue(80)
         # add to layout
-        ctrl_layout.addWidget(self.prev_btn)
-        ctrl_layout.addWidget(self.play_btn)
-        ctrl_layout.addWidget(self.stop_btn)
-        ctrl_layout.addWidget(self.next_btn)
-        ctrl_layout.addWidget(self.repeat_btn)
-        ctrl_layout.addWidget(self.shuffle_btn)
-        ctrl_layout.addWidget(QLabel("Speed:"))
-        ctrl_layout.addWidget(self.speed_slider)
-        ctrl_layout.addWidget(self.speed_label)
-        ctrl_layout.addWidget(self.seek_slider, 1)
-        ctrl_layout.addWidget(self.vol_slider)
+        self.ctrl_layout.addWidget(self.prev_btn)
+        self.ctrl_layout.addWidget(self.play_btn)
+        self.ctrl_layout.addWidget(self.stop_btn)
+        self.ctrl_layout.addWidget(self.next_btn)
+        self.ctrl_layout.addWidget(self.repeat_btn)
+        self.ctrl_layout.addWidget(self.shuffle_btn)
+        self.ctrl_layout.addWidget(QLabel("Speed:"))
+        self.ctrl_layout.addWidget(self.speed_slider)
+        self.ctrl_layout.addWidget(self.speed_label)
+        self.ctrl_layout.addWidget(self.seek_slider, 1)
+        self.ctrl_layout.addWidget(self.vol_slider)
         # connect signals
         self.vol_slider.valueChanged.connect(self.set_volume)
         self.speed_slider.valueChanged.connect(self.set_playback_speed)
-        self.vlay.addWidget(ctrl)
+        self.vlay.addWidget(self.ctrl)
         # small status label for playback state/time
         self.status_label = QLabel("Ready")
         self.status_label.setFixedHeight(18)
@@ -352,6 +389,7 @@ class AIMPlayer(QMainWindow):
         view = mb.addMenu("View")
         pip = QAction("Mini-Player", self, checkable=True); pip.triggered.connect(self.toggle_mini)
         view.addAction(pip)
+        settings = QAction("Settings", self); settings.triggered.connect(self.open_settings); tools.addAction(settings)
     def open_file(self):
         f,_ = QFileDialog.getOpenFileName(self,"Open media","","Media files (*.mp4 *.mkv *.mp3 *.wav *.ogg)")
         if f:
@@ -441,12 +479,6 @@ class AIMPlayer(QMainWindow):
             print(f"Capture failed: {e}")
             self.status_label.setText("Capture failed")
 
-    def open_file(self):
-        f,_ = QFileDialog.getOpenFileName(self,"Open media","","Media files (*.mp4 *.mkv *.mp3 *.wav *.ogg)")
-        if f:
-            self.add_recent_file(f)  # track in recent files
-            self.playlist.addItem(f)
-            self.play_media(f)
     def play_item(self, item):
         self.play_media(item.text())
     def play_media(self, path):
@@ -751,6 +783,40 @@ class AIMPlayer(QMainWindow):
             except Exception:
                 pass
 
+    # helper: load/save settings
+    def load_settings(self):
+		try:
+			if self.settings_path.exists():
+				with open(self.settings_path, "r") as f:
+					self.settings.update(json.load(f))
+		except Exception:
+			pass
+    def save_settings(self):
+		try:
+			with open(self.settings_path, "w") as f:
+				json.dump(self.settings, f)
+		except Exception:
+			pass
+
+    # apply simple theme
+    def apply_theme(self, theme):
+		if theme == "dark":
+			# minimal dark stylesheet
+			self.setStyleSheet("QWidget{background-color:#222; color:#ddd;} QSlider::groove:horizontal{background:#444;} QPushButton{background:#333; color:#fff}")
+		else:
+			self.setStyleSheet("")  # default
+
+    # open settings dialog
+    def open_settings(self):
+		dlg = SettingsDialog(self.settings)
+		if dlg.exec_():
+			new = dlg.get_values()
+			self.settings.update(new)
+			# apply and persist
+			self.apply_theme(self.settings.get("theme","light"))
+			self.vol_slider.setValue(self.settings.get("default_volume",80))
+			self.save_settings()
+
     def keyPressEvent(self, event):
         """Handle keyboard shortcuts"""
         key = event.key()
@@ -776,13 +842,54 @@ class AIMPlayer(QMainWindow):
             # toggle fullscreen
             if self.isFullScreen():
                 self.showNormal()
+                self.show_controls()
+                self.auto_hide_timer.stop()
             else:
                 self.showFullScreen()
+                # start auto-hide if enabled
+                if self.settings.get("auto_hide", True):
+                    self.auto_hide_timer.start()
         elif key == Qt.Key_Escape:
             if self.isFullScreen():
                 self.showNormal()
         else:
             super().keyPressEvent(event)
+
+    # mouse movement shows controls and restarts timer
+    def mouseMoveEvent(self, event):
+		try:
+			if self.isFullScreen():
+				self.show_controls()
+				if self.settings.get("auto_hide", True):
+					self.auto_hide_timer.start()
+			# pass to base
+		except:
+			pass
+		return super().mouseMoveEvent(event)
+
+    def hide_controls(self):
+		try:
+			if self.isFullScreen():
+				# hide toolbars/controls
+				if hasattr(self, "ctrl"):
+					self.ctrl.hide()
+				try:
+					self.menuBar().hide()
+				except:
+					pass
+		except:
+			pass
+
+    def show_controls(self):
+		try:
+			if hasattr(self, "ctrl"):
+				self.ctrl.show()
+			try:
+				self.menuBar().show()
+			except:
+				pass
+		except:
+			pass
 
     def seek_relative(self, delta):
         """Seek relative to current position"""
