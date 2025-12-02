@@ -1,7 +1,12 @@
 # app.py
 # AIM Player v5 Ultimate — Integrated PyQt5 application (simplified production bundle)
 # Note: This is a functional scaffold assembled from the project conversation.
-import sys, os, random, numpy as np
+
+# Set environment variable BEFORE importing cv2 to increase ffmpeg read attempts for multi-stream videos
+import os
+os.environ['OPENCV_FFMPEG_READ_ATTEMPTS'] = '10000'
+
+import sys, random, numpy as np
 import cv2
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QAction, QMenu,
                              QFileDialog, QVBoxLayout, QHBoxLayout, QSlider, QPushButton,
@@ -192,7 +197,13 @@ class AIMPlayer(QMainWindow):
         ctrl_layout.addWidget(self.stop_btn)
         ctrl_layout.addWidget(self.seek_slider, 1)
         ctrl_layout.addWidget(self.vol_slider)
+        # connect volume changes
+        self.vol_slider.valueChanged.connect(self.set_volume)
         self.vlay.addWidget(ctrl)
+        # small status label for playback state/time
+        self.status_label = QLabel("Ready")
+        self.status_label.setFixedHeight(18)
+        self.vlay.addWidget(self.status_label)
         self.play_btn.clicked.connect(self.toggle_play)
         self.stop_btn.clicked.connect(self.stop_playback)
         self.seek_slider.sliderReleased.connect(self.seek_to_slider)
@@ -289,13 +300,19 @@ class AIMPlayer(QMainWindow):
 
         self.audio_engine = AudioEngine(path)
         self.visualizer.audio_engine = self.audio_engine
+        # set initial volume on engine
+        self.audio_engine.volume = self.vol_slider.value()
         self.video_engine = VideoEngine(path)
 
         # create VLC media player for audio/video if available
         if _HAS_VLC:
             try:
-                # use MediaPlayer directly with file path (VLC will handle audio)
                 self.vlc_player = vlc.MediaPlayer(path)
+                # apply initial volume if VLC supports it
+                try:
+                    self.vlc_player.audio_set_volume(self.vol_slider.value())
+                except Exception:
+                    pass
             except Exception as e:
                 print("VLC media player creation failed:", e)
                 self.vlc_player = None
@@ -345,9 +362,18 @@ class AIMPlayer(QMainWindow):
                     self.vlc_player.play()
                 except Exception as e:
                     print("VLC play failed:", e)
-            # start simulated audio spectrum (kept running regardless to drive visualizer)
+                self.status_label.setText("Playing (VLC)")
+            else:
+                self.status_label.setText("Playing (no VLC)")
+             # start simulated audio spectrum (kept running regardless to drive visualizer)
             if self.audio_engine:
                 self.audio_engine.start_stream()
+            # make sure volume applied to engine if using ffmpeg fallback
+            try:
+                if self.audio_engine:
+                    self.audio_engine.volume = self.vol_slider.value()
+            except:
+                pass
             self.play_btn.setText("Pause")
         except Exception as e:
             print("Error starting playback:", e)
@@ -423,6 +449,7 @@ class AIMPlayer(QMainWindow):
             # optionally release player object
             self.vlc_player = None
         self.play_btn.setText("Play")
+        self.status_label.setText("Stopped")
 
     def update_frame(self, frame):
         # frame is BGR numpy array
@@ -453,6 +480,11 @@ class AIMPlayer(QMainWindow):
                 self.seek_slider.blockSignals(True)
                 self.seek_slider.setValue(max(0, min(1000, val)))
                 self.seek_slider.blockSignals(False)
+                # update status with current time
+                try:
+                    self.status_label.setText(f"{pos:.1f}s / {self._duration:.1f}s")
+                except:
+                    pass
             except:
                 pass
 
@@ -473,6 +505,11 @@ class AIMPlayer(QMainWindow):
                     self.vlc_player.set_time(int(sec*1000.0))
                 except Exception as e:
                     print("VLC seek failed:", e)
+            # update status immediately after seeking
+            try:
+                self.status_label.setText(f"Seek to {sec:.1f}s")
+            except:
+                pass
     def eq_changed(self):
         if self.audio_engine:
             vals = [s.value() for s in self.eq_sliders]
@@ -516,6 +553,21 @@ class AIMPlayer(QMainWindow):
     def on_frame_time(self, t):
         if hasattr(self, 'subtitle_overlay'):
             self.subtitle_overlay.update_time(t)
+
+    def set_volume(self, val):
+        # val: 0..100
+        if self.vlc_player:
+            try:
+                # python-vlc uses 0..100
+                self.vlc_player.audio_set_volume(int(val))
+            except Exception:
+                pass
+        # apply to our AudioEngine fallback
+        if self.audio_engine:
+            try:
+                self.audio_engine.volume = int(val)
+            except Exception:
+                pass
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

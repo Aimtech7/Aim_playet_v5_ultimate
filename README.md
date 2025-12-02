@@ -221,3 +221,58 @@ torch>=2.0
 numpy>=1.25
 pyaudio>=0.2.13
 ffmpeg-python>=0.3.0
+````markdown
+# AIM Player v5 Ultimate
+
+This archive contains the full AIM Player v5 Ultimate project — PyQt5 desktop app with AI audio/video features.
+
+Run:
+```
+pip install -r requirements.txt
+python app.py
+```
+# AIM Player v5 Ultimate — minimal README
+
+## Prerequisites
+- Python 3.8+
+- pip
+
+Recommended Python packages:
+- PyQt5
+- numpy
+- opencv-python
+- pyaudio
+- python-vlc (optional, for easier playback in many formats)
+
+Install example:
+```
+pip install PyQt5 numpy opencv-python pyaudio python-vlc
+```
+
+Native tools:
+- VLC (optional): install VLC desktop application if you want python-vlc to control playback.
+- ffmpeg: required for the built-in ffmpeg->pyaudio audio fallback. Make sure ffmpeg is in PATH.
+
+## How it works
+- The app uses VideoEngine (OpenCV) to decode frames and display them.
+- AudioEngine attempts to use ffmpeg to decode audio and plays via PyAudio, providing a real spectrum for the visualizer.
+- If python-vlc is installed and available, the app will create a VLC MediaPlayer for playback; this is preferred for robust audio handling.
+- If VLC is not present, the integrated ffmpeg->pyaudio pipeline will be used (ensure ffmpeg is installed).
+
+## Run
+1. Ensure ffmpeg and (optionally) VLC are installed and available in PATH.
+2. From project directory:
+   ```
+   python app.py
+   ```
+3. Use the UI to open a media file and control playback with Play/Pause, Stop, and Seek.
+
+## Troubleshooting
+- No sound:
+  - If using VLC: ensure VLC is installed and python-vlc imports successfully.
+  - If using ffmpeg fallback: ensure ffmpeg is in PATH and pyaudio can open an output device.
+- Errors printed to console will indicate failed connections (ffmpeg, pyaudio, VLC). Run from terminal to see logs.
+
+## Notes
+- The integrated ffmpeg pipeline is a simple fallback for playback and the visualizer; for production-quality audio handling consider a full ffmpeg/decoder integration or using VLC for playback.
+- The app focuses on a simple playable prototype: further polishing (thread-safety, device selection, advanced seeking) is recommended.

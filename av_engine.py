@@ -4,6 +4,7 @@ import cv2, numpy as np, threading, time
 import torch
 import pyaudio
 from PyQt5.QtCore import pyqtSignal, QObject
+import subprocess, shutil
 
 class VideoEngine(QObject):
     frame_time_signal = pyqtSignal(float)
@@ -19,53 +20,58 @@ class VideoEngine(QObject):
         self.saturation = 1.0
         self.filters = {'sharpen':False, 'blur':False, 'lut':None}
         self.ai_model = None
+    
     def load_ai(self, model_path):
         try:
             self.ai_model = torch.load(model_path, map_location='cpu')
             self.ai_model.eval()
         except Exception as e:
             print("AI load failed:", e)
+
     def grab_frame(self):
         ret, frame = self.cap.read()
         if not ret:
             return None
         return frame
+
     def start(self):
         if self.running:
             return
         self.running = True
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
+
     def pause(self):
-        # stop emitting frames but keep capture open (so resume keeps position)
         self.running = False
+
     def stop(self):
         self.running = False
-        # release capture so repeated loads work
         try:
             if self.cap is not None:
                 self.cap.release()
         except:
             pass
+
     def _loop(self):
-        # ensure capture exists
         if not self.cap or not self.cap.isOpened():
             self.cap = cv2.VideoCapture(self.path)
-        # compute fps-based sleep
         fps = self.cap.get(cv2.CAP_PROP_FPS) or 30.0
         delay = 1.0 / fps
         while self.running and self.cap.isOpened():
             ret, frame = self.cap.read()
             if not ret:
-                # loop video
-                self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                # try to loop video; catch seek errors gracefully
+                try:
+                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                except Exception as e:
+                    # seek failed (multi-stream video issue); stop loop
+                    print(f"Seek/loop failed (expected for multi-stream): {e}")
+                    break
                 continue
-            # apply filters before emitting
             try:
                 frame_proc = self.apply_filters(frame)
             except Exception:
                 frame_proc = frame
-            # emit time and raw frame (BGR numpy array)
             t = self.cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
             try:
                 self.frame_time_signal.emit(t)
@@ -73,14 +79,8 @@ class VideoEngine(QObject):
             except Exception:
                 pass
             time.sleep(delay)
-        # cleanup if thread exits
-        try:
-            # keep capture open for pause; on full stop user should call stop()
-            pass
-        except:
-            pass
+
     def apply_filters(self, frame):
-        # brightness/contrast/saturation
         frame = cv2.convertScaleAbs(frame, alpha=self.contrast, beta=self.brightness*50)
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV).astype(float)
         hsv[:,:,1] = np.clip(hsv[:,:,1]*self.saturation,0,255)
@@ -91,13 +91,16 @@ class VideoEngine(QObject):
         if self.filters.get('blur'):
             frame = cv2.GaussianBlur(frame,(5,5),0)
         return frame
+
     def ai_enhance(self, frame):
         return frame
+
     def set_brightness(self,v): self.brightness = v
     def set_contrast(self,v): self.contrast = v
     def set_saturation(self,v): self.saturation = v
     def set_lut(self, name):
         self.filters['lut'] = name
+
     def get_time(self):
         return self.cap.get(cv2.CAP_PROP_POS_MSEC)/1000.0
 
@@ -109,35 +112,81 @@ class AudioEngine:
         self.eq = [0]*31
         self.latest_spectrum = None
         self.ai_eq_enabled = False
-        self._spec_thread = None
-        self._spec_running = False
-        self.volume = 0.8  # 0.0..1.0
+        self._thread = None
+        self._running = False
+        self._proc = None
+        # audio format params (match ffmpeg args below)
+        self.rate = 44100
+        self.channels = 2
+        self.format = pyaudio.paInt16
+        self.frames_per_buffer = 4096
+        self.volume = 80  # 0..100
+        # check ffmpeg availability
+        self._have_ffmpeg = bool(shutil.which("ffmpeg"))
+
     def set_eq(self, vals):
         self.eq = vals
+
     def toggle_ai_eq(self, v):
         self.ai_eq_enabled = v
-    def set_volume(self, v):
-        # v expected 0..100 from UI slider; store normalized
-        try:
-            self.volume = max(0.0, min(1.0, float(v)/100.0))
-        except:
-            pass
+
     def start_stream(self):
-        # spawn a thread that simulates spectrum for visualizer and can be stopped
-        import threading, time, numpy as np
-        if self._spec_running:
+        if self._running:
             return
-        self._spec_running = True
-        def loop():
-            while self._spec_running:
-                # fake spectrum (volume affects amplitude)
-                self.latest_spectrum = np.abs(np.random.randn(256)) * (0.2 + 0.8*self.volume)
-                time.sleep(0.05)
-        self._spec_thread = threading.Thread(target=loop, daemon=True)
-        self._spec_thread.start()
-    def stop_stream(self):
-        try:
-            self._spec_running = False
-            self._spec_thread = None
-        except:
-            pass
+        self._running = True
+
+        def run():
+            if self._have_ffmpeg:
+                cmd = [
+                    'ffmpeg', '-hide_banner', '-loglevel', 'error',
+                    '-i', self.path, '-vn',
+                    '-f', 's16le', '-acodec', 'pcm_s16le',
+                    '-ar', str(self.rate), '-ac', str(self.channels),
+                    'pipe:1'
+                ]
+                try:
+                    self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                except Exception:
+                    self._proc = None
+
+            if self._proc:
+                try:
+                    self.stream = self.p.open(format=self.format,
+                                              channels=self.channels,
+                                              rate=self.rate,
+                                              output=True,
+                                              frames_per_buffer=self.frames_per_buffer)
+                except Exception:
+                    try:
+                        self._proc.kill()
+                    except:
+                        pass
+                    self._proc = None
+
+            while self._running:
+                if self._proc and self._proc.stdout:
+                    try:
+                        chunk_bytes = self.frames_per_buffer * self.channels * 2
+                        data = self._proc.stdout.read(chunk_bytes)
+                        if not data:
+                            # EOF
+                            break
+                        # apply volume scaling if needed
+                        if self.stream:
+                            if self.volume != 100:
+                                try:
+                                    arr = np.frombuffer(data, dtype=np.int16).astype(np.int32)
+                                    factor = float(self.volume) / 100.0
+                                    arr = np.clip((arr * factor), -32768, 32767).astype(np.int16)
+                                    out = arr.tobytes()
+                                except Exception:
+                                    out = data
+                            else:
+                                out = data
+                            try:
+                                self.stream.write(out)
+                            except Exception:
+                                # ignore write errors
+                                pass
+                        # compute simple spectrum from left channel
+                        try:
