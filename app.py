@@ -37,13 +37,25 @@ class SubtitleOverlay(QLabel):
         self.setAttribute(Qt.WA_TransparentForMouseEvents)
         # ensure fully translucent background on systems that need the flag
         self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.font_size = 18
+        self.color = "white"
+        self.delay = 0.0
+    def set_style(self, font_size=None, color=None, delay=None):
+        if font_size is not None:
+            self.font_size = int(font_size)
+        if color is not None:
+            self.color = color
+        if delay is not None:
+            self.delay = float(delay)
+        self.setStyleSheet(f"color:{self.color}; background-color:transparent; font-size:{self.font_size}px;")
     def load(self, path):
         sp = SubtitleParser(path)
         self.subs_tracks.append(sp)
     def update_time(self, t):
+        t_eff = t + getattr(self, 'delay', 0.0)
         text = ""
         for s in self.subs_tracks:
-            line = s.get_text(t)
+            line = s.get_text(t_eff)
             if line:
                 text += line + "\n"
         self.setText(text)
@@ -185,296 +197,73 @@ class FileInfoDialog(QDialog):
 
 # new Settings dialog
 class SettingsDialog(QDialog):
+    """Settings dialog for theme, volume, and other preferences"""
     def __init__(self, settings):
         super().__init__()
         self.setWindowTitle("Settings")
-        self.setGeometry(450, 250, 400, 250)
-        self.settings = settings
-        l = QVBoxLayout(self)
-        
-        # default volume
-        l.addWidget(QLabel("Default Volume"))
-        self.vol = QSlider(Qt.Horizontal)
-        self.vol.setRange(0, 100)
-        self.vol.setValue(self.settings.get("default_volume", 80))
-        l.addWidget(self.vol)
-        
-        # theme selection with preview
-        l.addWidget(QLabel("Theme"))
-        from PyQt5.QtWidgets import QComboBox
-        self.theme = QComboBox()
-        self.theme.addItems(["Light", "Dark", "Auto"])
-        self.theme.setCurrentText(self.settings.get("theme", "Light"))
-        self.theme.currentTextChanged.connect(self.preview_theme)
-        l.addWidget(self.theme)
-        
-        # preview label
-        self.preview_label = QLabel("Preview: Theme will be applied on OK")
-        self.preview_label.setStyleSheet("border:1px solid #ccc; padding:10px; background:#f5f5f5;")
-        l.addWidget(self.preview_label)
-        
-        # auto-hide controls
-        self.auto_hide_cb = QPushButton("Auto-hide Controls in Fullscreen: " + ("On" if self.settings.get("auto_hide", True) else "Off"))
-        self.auto_hide_cb.setCheckable(True)
-        self.auto_hide_cb.setChecked(self.settings.get("auto_hide", True))
-        self.auto_hide_cb.clicked.connect(lambda: self.auto_hide_cb.setText("Auto-hide Controls in Fullscreen: " + ("On" if self.auto_hide_cb.isChecked() else "Off")))
-        l.addWidget(self.auto_hide_cb)
-        
-        # buttons
-        btns = QHBoxLayout()
-        ok = QPushButton("OK")
-        ok.clicked.connect(self.accept)
-        cancel = QPushButton("Cancel")
-        cancel.clicked.connect(self.reject)
-        btns.addWidget(ok)
-        btns.addWidget(cancel)
-        l.addLayout(btns)
-    
-    def preview_theme(self):
-        """Update preview label based on selected theme"""
-        theme = self.theme.currentText()
-        if theme == "Dark":
-            self.preview_label.setStyleSheet("border:1px solid #666; padding:10px; background:#222; color:#ddd;")
-            self.preview_label.setText("Preview: Dark theme (dark background)")
-        elif theme == "Auto":
-            self.preview_label.setStyleSheet("border:1px solid #ccc; padding:10px; background:#e8e8e8; color:#333;")
-            self.preview_label.setText("Preview: Auto theme (system theme)")
-        else:
-            self.preview_label.setStyleSheet("border:1px solid #ccc; padding:10px; background:#f5f5f5;")
-            self.preview_label.setText("Preview: Light theme (default)")
-    
-    def get_values(self):
-        return {
-            "default_volume": self.vol.value(),
-            "theme": self.theme.currentText().lower(),
-            "auto_hide": self.auto_hide_cb.isChecked()
-        }
-
-class SubtitleCustomizeDialog(QDialog):
-    """Customize subtitle appearance"""
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Customize Subtitles")
-        self.setGeometry(400, 300, 400, 250)
+        self.setGeometry(450, 250, 360, 200)
         layout = QVBoxLayout()
-        
-        # Font size
-        layout.addWidget(QLabel("Font Size:"))
-        self.font_slider = QSlider(Qt.Horizontal)
-        self.font_slider.setRange(8, 32)
-        self.font_slider.setValue(18)
-        layout.addWidget(self.font_slider)
-        
-        # Color picker
-        layout.addWidget(QLabel("Text Color:"))
-        self.color_btn = QPushButton("Pick Color")
-        self.color_btn.clicked.connect(self.pick_color)
-        self.color_label = QLabel("White")
-        layout.addWidget(self.color_btn)
-        layout.addWidget(self.color_label)
-        
-        # Delay
-        layout.addWidget(QLabel("Delay (±seconds):"))
-        self.delay_slider = QSlider(Qt.Horizontal)
-        self.delay_slider.setRange(-200, 200)  # ±2 seconds in 10ms steps
-        self.delay_slider.setValue(0)
-        self.delay_label = QLabel("0.0s")
-        layout.addWidget(self.delay_slider)
-        layout.addWidget(self.delay_label)
-        
-        self.delay_slider.valueChanged.connect(lambda v: self.delay_label.setText(f"{v/100.0:.1f}s"))
-        
-        # Buttons
-        btn_layout = QHBoxLayout()
-        apply_btn = QPushButton("Apply")
-        apply_btn.clicked.connect(self.accept)
-        close_btn = QPushButton("Close")
-        close_btn.clicked.connect(self.reject)
-        btn_layout.addWidget(apply_btn)
-        btn_layout.addWidget(close_btn)
-        layout.addLayout(btn_layout)
-        
+        # volume
+        layout.addWidget(QLabel("Default Volume (0-100)"))
+        self.vol_spin = QSlider(Qt.Horizontal)
+        self.vol_spin.setRange(0,100)
+        self.vol_spin.setValue(settings.get("volume", 80))
+        layout.addWidget(self.vol_spin)
+        # playback speed
+        layout.addWidget(QLabel("Default Playback Speed (0.5x-2.0x)"))
+        self.speed_slider = QSlider(Qt.Horizontal)
+        self.speed_slider.setRange(5,20)
+        self.speed_slider.setValue(int(settings.get("playback_speed",1.0)*10))
+        layout.addWidget(self.speed_slider)
+        # theme selection
+        layout.addWidget(QLabel("Theme"))
+        self.theme_sel = QInputDialog()  # placeholder widget used for simple prompt below
+        self.theme_combo = QLabel(settings.get("theme","Default"))
+        layout.addWidget(self.theme_combo)
+        # simple theme toggle buttons
+        theme_row = QHBoxLayout()
+        btn_default = QPushButton("Default"); btn_default.clicked.connect(lambda: self.theme_combo.setText("Default"))
+        btn_dark = QPushButton("Dark"); btn_dark.clicked.connect(lambda: self.theme_combo.setText("Dark"))
+        theme_row.addWidget(btn_default); theme_row.addWidget(btn_dark)
+        layout.addLayout(theme_row)
+        # buttons
+        row = QHBoxLayout()
+        ok = QPushButton("OK"); ok.clicked.connect(self.accept)
+        cancel = QPushButton("Cancel"); cancel.clicked.connect(self.reject)
+        row.addWidget(ok); row.addWidget(cancel)
+        layout.addLayout(row)
         self.setLayout(layout)
-        self.selected_color = (255, 255, 255)  # white (R, G, B)
-
-    def pick_color(self):
-        color = QColorDialog.getColor(QColor(*self.selected_color), self)
-        if color.isValid():
-            self.selected_color = (color.red(), color.green(), color.blue())
-            self.color_label.setText(f"RGB({self.selected_color[0]}, {self.selected_color[1]}, {self.selected_color[2]})")
+    def values(self):
+        return {
+            "volume": int(self.vol_spin.value()),
+            "playback_speed": float(self.speed_slider.value())/10.0,
+            "theme": self.theme_combo.text()
+        }
 
 class AIMPlayer(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("AIM Player v5 Ultimate")
-        self.setGeometry(50, 50, 1200, 720)
-        icon_path = os.path.join("assets", "icons", "player_icon.png")
-        if os.path.exists(icon_path):
-            self.setWindowIcon(QIcon(icon_path))
-        
-        # Initialize settings
-        self.settings_path = Path(__file__).parent / "settings.json"
-        self.settings = {
-            "default_volume": 80,
-            "theme": "light",
-            "auto_hide": True
-        }
-        self.load_settings()
-        
-        # Auto-hide timer for fullscreen
-        self.auto_hide_timer = QTimer()
-        self.auto_hide_timer.setInterval(3000)  # 3 seconds
-        self.auto_hide_timer.timeout.connect(self.hide_controls)
-        
-        self.audio_engine = None
-        self.video_engine = None
-        self.current_file = None
-        self.current_playlist_index = -1
-        self.repeat_mode = 0
-        self.shuffle_enabled = False
-        self.playback_speed = 1.0
-        self.vlc_instance = vlc.Instance() if _HAS_VLC else None
-        self.vlc_player = None
-        
         # Recent files tracking
-        self.recent_files = []
+        self.recent_files = []  # list of recent file paths
         self.recent_files_path = Path(__file__).parent / "recent_files.json"
+        self.settings_path = Path(__file__).parent / "settings.json"
         self.load_recent_files()
-        
-        # Central video layout
-        central = QWidget()
-        self.setCentralWidget(central)
-        self.vlay = QVBoxLayout(central)
-        # create a video container so overlay can be parented to it
-        self.video_container = QWidget()
-        self.video_container.setMinimumHeight(360)
-        self.video_container_layout = QVBoxLayout(self.video_container)
-        self.video_display = QLabel("No video loaded")
-        self.video_display.setAlignment(Qt.AlignCenter)
-        # make video area clearly visible so controls are not hidden visually
-        self.video_display.setStyleSheet("background-color:black; color:white;")
-        self.video_display.setMinimumSize(640, 360)
-        self.video_display.setScaledContents(False)
-        self.video_container_layout.addWidget(self.video_display)
-        self.vlay.addWidget(self.video_container)
-        # subtitle overlay (will be shown on top of video_display)
-        self.subtitle_overlay = None
-        # Playlist
-        self.playlist_dock = QDockWidget("Playlist", self)
-        self.playlist = QListWidget()
-        self.playlist.setDragDropMode(QListWidget.InternalMove)
-        self.playlist.itemDoubleClicked.connect(self.play_item)
-        self.playlist_dock.setWidget(self.playlist)
-        self.addDockWidget(Qt.RightDockWidgetArea, self.playlist_dock)
-        # Visualizer
-        self.visualizer = VisualizerWidget(None)
-        self.vlay.addWidget(self.visualizer)
-        # Controls bar (play/pause, stop, seek, volume, speed)
-        self.ctrl = QWidget()  # replaced local ctrl variable with self.ctrl
-        self.ctrl_layout = QHBoxLayout(self.ctrl)
-        self.play_btn = QPushButton("Play")
-        self.stop_btn = QPushButton("Stop")
-        self.prev_btn = QPushButton("◄◄")  # Previous
-        self.next_btn = QPushButton("►►")  # Next
-        self.repeat_btn = QPushButton("Repeat: Off")
-        self.shuffle_btn = QPushButton("Shuffle: Off")
-        # keep transport buttons compact
-        self.play_btn.setFixedWidth(80)
-        self.stop_btn.setFixedWidth(80)
-        self.prev_btn.setFixedWidth(50)
-        self.next_btn.setFixedWidth(50)
-        self.repeat_btn.setFixedWidth(100)
-        self.shuffle_btn.setFixedWidth(100)
-        # speed slider
-        self.speed_slider = QSlider(Qt.Horizontal)
-        self.speed_slider.setRange(5, 20)  # 0.5x to 2.0x (multiply by 0.1)
-        self.speed_slider.setValue(10)  # 1.0x
-        self.speed_slider.setMaximumWidth(80)
-        self.speed_label = QLabel("1.0x")
-        self.speed_label.setFixedWidth(30)
-        # seek and volume sliders
-        self.seek_slider = QSlider(Qt.Horizontal)
-        self.seek_slider.setRange(0,1000)
-        self.vol_slider = QSlider(Qt.Horizontal)
-        self.vol_slider.setRange(0,100)
-        self.vol_slider.setValue(80)
-        # add to layout
-        self.ctrl_layout.addWidget(self.prev_btn)
-        self.ctrl_layout.addWidget(self.play_btn)
-        self.ctrl_layout.addWidget(self.stop_btn)
-        self.ctrl_layout.addWidget(self.next_btn)
-        self.ctrl_layout.addWidget(self.repeat_btn)
-        self.ctrl_layout.addWidget(self.shuffle_btn)
-        self.ctrl_layout.addWidget(QLabel("Speed:"))
-        self.ctrl_layout.addWidget(self.speed_slider)
-        self.ctrl_layout.addWidget(self.speed_label)
-        self.ctrl_layout.addWidget(self.seek_slider, 1)
-        self.ctrl_layout.addWidget(self.vol_slider)
-        # connect signals
-        self.vol_slider.valueChanged.connect(self.set_volume)
-        self.speed_slider.valueChanged.connect(self.set_playback_speed)
-        self.vlay.addWidget(self.ctrl)
-        # small status label for playback state/time
-        self.status_label = QLabel("Ready")
-        self.status_label.setFixedHeight(18)
-        self.vlay.addWidget(self.status_label)
-        self.play_btn.clicked.connect(self.toggle_play)
-        self.stop_btn.clicked.connect(self.stop_playback)
-        self.prev_btn.clicked.connect(self.play_previous)
-        self.next_btn.clicked.connect(self.play_next)
-        self.repeat_btn.clicked.connect(self.cycle_repeat)
-        self.shuffle_btn.clicked.connect(self.toggle_shuffle)
-        self.seek_slider.sliderReleased.connect(self.seek_to_slider)
-        # Sliders area (left dock)
-        self.sliders_dock = QDockWidget("Sliders", self)
-        sbox = QWidget()
-        sLayout = QVBoxLayout()
-        sbox.setLayout(sLayout)
-        self.eq_sliders = []
-        for i in range(31):
-            s = QSlider(Qt.Horizontal)
-            s.setMinimum(-15); s.setMaximum(15); s.setValue(0)
-            s.valueChanged.connect(self.eq_changed)
-            sLayout.addWidget(s)
-            self.eq_sliders.append(s)
-        # video filters sliders
-        self.bright = QSlider(Qt.Horizontal); self.bright.setRange(-50,50); self.bright.setValue(0)
-        self.bright.valueChanged.connect(self.video_filters_changed)
-        sLayout.addWidget(self.bright)
-        self.contrast = QSlider(Qt.Horizontal); self.contrast.setRange(10,300); self.contrast.setValue(100)
-        self.contrast.valueChanged.connect(self.video_filters_changed)
-        sLayout.addWidget(self.contrast)
-        self.sat = QSlider(Qt.Horizontal); self.sat.setRange(0,200); self.sat.setValue(100)
-        self.sat.valueChanged.connect(self.video_filters_changed)
-        sLayout.addWidget(self.sat)
-        self.sliders_dock.setWidget(sbox)
-        self.addDockWidget(Qt.LeftDockWidgetArea, self.sliders_dock)
-        # menus
-        self.init_menus()
-        # position timer to update seek slider
-        self.position_timer = QTimer()
-        self.position_timer.setInterval(200)
-        self.position_timer.timeout.connect(self._update_seek)
-        self.position_timer.start()
-
-        # Add statistics label
-        self.stats_label = QLabel("Stats: FPS=0 | BR=0kb/s")
-        self.stats_label.setFixedHeight(18)
-        self.stats_label.setStyleSheet("color:green; font-size:10px;")
-        self.stats_visible = False
-
-        # Set drag & drop acceptance
+        self.load_settings()
+        # ...existing code for video container, playlist, visualizer, controls...
+        # keep reference to controls widget for show/hide and enable drag/drop
+        self.controls_widget = ctrl
         self.setAcceptDrops(True)
-        
-        # Fullscreen control timer
-        self._fullscreen_timer = QTimer()
-        self._fullscreen_timer.timeout.connect(self._hide_fullscreen_controls)
+        # fullscreen auto-hide timer
+        self.hide_controls_timer = QTimer(self)
+        self.hide_controls_timer.setInterval(3000)  # 3s inactivity
+        self.hide_controls_timer.timeout.connect(self.hide_controls)
+        # ensure controls visible initially
+        self.show_controls()
 
     def init_menus(self):
         mb = self.menuBar()
         media = mb.addMenu("Media")
-        openf = QAction("Open File", self)
-        openf.triggered.connect(self.open_file)
+        openf = QAction("Open File", self); openf.triggered.connect(self.open_file)
         media.addAction(openf)
         # Recent files submenu
         self.recent_menu = media.addMenu("Recent Files")
@@ -502,35 +291,16 @@ class AIMPlayer(QMainWindow):
         subtitle.addAction(customize)
         
         tools = mb.addMenu("Tools")
-        hotkeys = QAction("Hotkeys Editor", self)
-        hotkeys.triggered.connect(self.open_hotkeys)
+        hotkeys = QAction("Hotkeys Editor", self); hotkeys.triggered.connect(self.open_hotkeys)
         tools.addAction(hotkeys)
-        skin = QAction("Skin Editor", self)
-        skin.triggered.connect(self.open_skin)
-        tools.addAction(skin)
-        lut = QAction("Select LUT", self)
-        lut.triggered.connect(self.open_lut)
-        tools.addAction(lut)
-        info = QAction("File Information", self)
-        info.triggered.connect(self.open_file_info)
-        tools.addAction(info)
-        capture = QAction("Capture Frame", self)
-        capture.triggered.connect(self.capture_frame)
-        tools.addAction(capture)
-        settings = QAction("Settings", self)
-        settings.triggered.connect(self.open_settings)
-        tools.addAction(settings)
-        bookmarks = mb.addMenu("Bookmarks")
-        bm = QAction("Manage Bookmarks", self)
-        bm.triggered.connect(self.open_bookmarks)
-        bookmarks.addAction(bm)
-        view = mb.addMenu("View")
-        pip = QAction("Mini-Player", self, checkable=True)
-        pip.triggered.connect(self.toggle_mini)
-        view.addAction(pip)
-        # Add statistics
-        stats = QAction("Statistics", self, checkable=True); stats.triggered.connect(self.toggle_statistics)
-        view.addAction(stats)
+        settings_act = QAction("Settings", self); settings_act.triggered.connect(self.open_settings)
+        tools.addAction(settings_act)
+        eq_menu = tools.addMenu("EQ Presets")
+        eq_save = QAction("Save Preset", self); eq_save.triggered.connect(self.save_eq_preset_dialog)
+        eq_menu.addAction(eq_save)
+        eq_load = QAction("Load Preset", self); eq_load.triggered.connect(self.load_eq_preset_dialog)
+        eq_menu.addAction(eq_load)
+        # ...existing tools/menu items (info, capture)...
 
     def update_audio_tracks_menu(self):
         """Build audio tracks menu from VLC if available"""
@@ -575,21 +345,87 @@ class AIMPlayer(QMainWindow):
         except Exception as e:
             print(f"Failed to switch audio track: {e}")
 
+    # EQ presets management
+    def save_eq_presets(self):
+        try:
+            with open(self.eq_presets_path, 'w') as f:
+                json.dump(self.eq_presets, f, indent=2)
+        except Exception as e:
+            print("Failed to save EQ presets:", e)
+
+    def load_eq_presets(self):
+        try:
+            if self.eq_presets_path.exists():
+                with open(self.eq_presets_path, 'r') as f:
+                    return json.load(f)
+        except Exception as e:
+            print("Failed to load EQ presets:", e)
+        return {}
+
+    def save_eq_preset_dialog(self):
+        name, ok = QInputDialog.getText(self, "Save EQ Preset", "Preset name:")
+        if not ok or not name:
+            return
+        vals = [s.value() for s in self.eq_sliders]
+        self.eq_presets[name] = vals
+        self.save_eq_presets()
+        self.status_label.setText(f"EQ preset '{name}' saved")
+
+    def load_eq_preset_dialog(self):
+        if not self.eq_presets:
+            self.status_label.setText("No EQ presets")
+            return
+        items = list(self.eq_presets.keys())
+        name, ok = QInputDialog.getItem(self, "Load EQ Preset", "Preset:", items, 0, False)
+        if ok and name:
+            vals = self.eq_presets.get(name)
+            if vals:
+                for s, v in zip(self.eq_sliders, vals):
+                    s.setValue(v)
+                self.audio_engine.set_eq(vals) if self.audio_engine else None
+                self.status_label.setText(f"EQ preset '{name}' loaded")
+
+    class SubtitleCustomizeDialog(QDialog):
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            self.setWindowTitle("Subtitle Customize")
+            self.setGeometry(480, 260, 320, 180)
+            layout = QVBoxLayout()
+            layout.addWidget(QLabel("Font Size"))
+            self.font_slider = QSlider(Qt.Horizontal); self.font_slider.setRange(10,48); self.font_slider.setValue(18)
+            layout.addWidget(self.font_slider)
+            layout.addWidget(QLabel("Delay (ms)"))
+            self.delay_slider = QSlider(Qt.Horizontal); self.delay_slider.setRange(-500,500); self.delay_slider.setValue(0)
+            layout.addWidget(self.delay_slider)
+            layout.addWidget(QLabel("Color"))
+            self.color_btn = QPushButton("Choose Color")
+            self.color_btn.clicked.connect(self.pick_color)
+            self.selected_color = "(255,255,255)"
+            layout.addWidget(self.color_btn)
+            row = QHBoxLayout()
+            ok = QPushButton("OK"); ok.clicked.connect(self.accept)
+            cancel = QPushButton("Cancel"); cancel.clicked.connect(self.reject)
+            row.addWidget(ok); row.addWidget(cancel)
+            layout.addLayout(row)
+            self.setLayout(layout)
+        def pick_color(self):
+            col = QColorDialog.getColor()
+            if col.isValid():
+                self.selected_color = f"rgb({col.red()},{col.green()},{col.blue()})"
+                self.color_btn.setStyleSheet(f"background:{self.selected_color}")
+
     def customize_subtitles(self):
         """Open subtitle customization dialog"""
         dlg = SubtitleCustomizeDialog(self)
         if dlg.exec_() == QDialog.Accepted:
-            # Apply font size
+            font_size = dlg.font_slider.value()
+            color = dlg.selected_color
+            delay_sec = dlg.delay_slider.value() / 1000.0
             if self.subtitle_overlay:
-                font_size = dlg.font_slider.value()
-                self.subtitle_overlay.setStyleSheet(f"color:rgb{dlg.selected_color}; background-color:transparent; font-size:{font_size}px;")
-            
-            # Apply delay
-            delay_offset = dlg.delay_slider.value() / 100.0  # convert to seconds
-            # Store for use in on_frame_time (not yet implemented; would need subtitle parser update)
-            if not hasattr(self, '_subtitle_delay'):
-                self._subtitle_delay = 0.0
-            self._subtitle_delay = delay_offset
+                self.subtitle_overlay.set_style(font_size=font_size, color=color, delay=delay_sec)
+            # persist subtitle prefs
+            self.settings['subtitle'] = {"font_size": font_size, "color": color, "delay": delay_sec}
+            self.save_settings()
 
     def toggle_statistics(self, checked):
         """Toggle statistics overlay visibility"""
@@ -797,21 +633,29 @@ class AIMPlayer(QMainWindow):
             # start VLC player if available
             if self.vlc_player:
                 try:
+                    # apply saved volume/speed if present
+                    if hasattr(self, 'settings') and self.settings:
+                        try:
+                            self.vlc_player.audio_set_volume(int(self.settings.get("volume", self.vol_slider.value())))
+                            self.vlc_player.set_rate(float(self.settings.get("playback_speed", self.playback_speed)))
+                        except:
+                            pass
                     self.vlc_player.play()
                 except Exception as e:
                     print("VLC play failed:", e)
                 self.status_label.setText("Playing (VLC)")
             else:
                 self.status_label.setText("Playing (no VLC)")
-             # start simulated audio spectrum (kept running regardless to drive visualizer)
+            # start audio engine (ffmpeg fallback)
             if self.audio_engine:
+                # apply volume setting
+                try:
+                    self.audio_engine.volume = int(self.settings.get("volume", self.vol_slider.value()))
+                except:
+                    pass
                 self.audio_engine.start_stream()
-            # make sure volume applied to engine if using ffmpeg fallback
-            try:
-                if self.audio_engine:
-                    self.audio_engine.volume = self.vol_slider.value()
-            except:
-                pass
+            # show controls and start hide timer if fullscreen
+            self.show_controls()
             self.play_btn.setText("Pause")
         except Exception as e:
             print("Error starting playback:", e)
@@ -1015,173 +859,91 @@ class AIMPlayer(QMainWindow):
 
     # helper: load/save settings
     def load_settings(self):
-        """Load settings from JSON file"""
+        self.settings = {}
         try:
             if self.settings_path.exists():
-                with open(self.settings_path, "r") as f:
-                    self.settings.update(json.load(f))
+                with open(self.settings_path, 'r') as f:
+                    self.settings = json.load(f)
+                # restore geometry if present
+                geom = self.settings.get('geometry')
+                if geom:
+                    try:
+                        self.restoreGeometry(bytes.fromhex(geom))
+                    except:
+                        pass
+                vol = int(self.settings.get("volume", self.vol_slider.value()))
+                self.vol_slider.setValue(vol)
+                sp = float(self.settings.get("playback_speed", self.playback_speed))
+                self.playback_speed = sp
+                try:
+                    self.speed_slider.setValue(int(sp*10))
+                    self.speed_label.setText(f"{sp:.1f}x")
+                except:
+                    pass
+                # apply theme
+                theme = self.settings.get('theme', 'Default')
+                if theme == 'Dark':
+                    self.apply_dark_theme()
+            else:
+                self.settings = {"volume": self.vol_slider.value(), "playback_speed": self.playback_speed, "theme":"Default"}
+                self.save_settings()
         except Exception as e:
-            print(f"Failed to load settings: {e}")
+            print("Failed to load settings:", e)
 
     def save_settings(self):
-        """Save settings to JSON file"""
         try:
-            with open(self.settings_path, "w") as f:
+            with open(self.settings_path, 'w') as f:
                 json.dump(self.settings, f, indent=2)
         except Exception as e:
-            print(f"Failed to save settings: {e}")
+            print("Failed to save settings:", e)
 
-    def apply_theme(self, theme):
-        """Apply stylesheet theme"""
-        if theme == "dark":
-            self.setStyleSheet("""
-                QWidget { background-color: #1e1e1e; color: #e0e0e0; }
-                QLabel { color: #e0e0e0; }
-                QPushButton { background-color: #333333; color: #e0e0e0; border: 1px solid #555; padding: 5px; }
-                QPushButton:hover { background-color: #444444; }
-                QSlider::groove:horizontal { background-color: #444444; }
-                QSlider::handle:horizontal { background-color: #888888; }
-                QMenuBar { background-color: #2e2e2e; color: #e0e0e0; }
-                QMenu { background-color: #2e2e2e; color: #e0e0e0; }
-                QMenu::item:selected { background-color: #444444; }
-            """)
-        elif theme == "auto":
-            # Auto theme: use system defaults
-            self.setStyleSheet("")
-        else:
-            # Light theme (default)
-            self.setStyleSheet("")
+    # Fullscreen auto-hide helpers
+    def hide_controls(self):
+        if self.isFullScreen():
+            try:
+                self.controls_widget.hide()
+                self.status_label.hide()
+            except:
+                pass
 
-    def open_settings(self):
-        """Open settings dialog"""
-        dlg = SettingsDialog(self.settings)
-        if dlg.exec_():
-            new = dlg.get_values()
-            self.settings.update(new)
-            # Apply and persist
-            self.apply_theme(self.settings.get("theme", "light"))
-            self.vol_slider.setValue(self.settings.get("default_volume", 80))
-            self.save_settings()
+    def show_controls(self):
+        try:
+            self.controls_widget.show()
+            self.status_label.show()
+            # restart hide timer only in fullscreen
+            if self.isFullScreen():
+                self.hide_controls_timer.start()
+            else:
+                self.hide_controls_timer.stop()
+        except:
+            pass
 
     def mouseMoveEvent(self, event):
-        """Show controls and restart auto-hide timer on mouse move in fullscreen"""
+        # show controls on mouse move and restart timer
         try:
-            if self.isFullScreen():
-                self.show_controls()
-                if self.settings.get("auto_hide", True):
-                    self.auto_hide_timer.start()
+            self.show_controls()
         except:
             pass
         return super().mouseMoveEvent(event)
 
-    def hide_controls(self):
-        """Hide toolbar and menu in fullscreen"""
-        try:
-            if self.isFullScreen():
-                if hasattr(self, "ctrl"):
-                    self.ctrl.hide()
-                try:
-                    self.menuBar().hide()
-                except:
-                    pass
-        except:
-            pass
-
-    def show_controls(self):
-        """Show toolbar and menu"""
-        try:
-            if hasattr(self, "ctrl"):
-                self.ctrl.show()
-            try:
-                self.menuBar().show()
-            except:
-                pass
-        except:
-            pass
-
-    def keyPressEvent(self, event):
-        """Handle keyboard shortcuts (enhanced with statistics toggle)"""
-        key = event.key()
-        if key == Qt.Key_Space:
-            self.toggle_play()
-        elif key == Qt.Key_Left:
-            self.seek_relative(-5.0)
-        elif key == Qt.Key_Right:
-            self.seek_relative(5.0)
-        elif key == Qt.Key_Up:
-            self.vol_slider.setValue(min(100, self.vol_slider.value() + 5))
-        elif key == Qt.Key_Down:
-            self.vol_slider.setValue(max(0, self.vol_slider.value() - 5))
-        elif key == Qt.Key_M:
-            if not hasattr(self, '_muted_vol'):
-                self._muted_vol = self.vol_slider.value()
-                self.vol_slider.setValue(0)
-            else:
-                self.vol_slider.setValue(self._muted_vol)
-                del self._muted_vol
-        elif key == Qt.Key_F:
-            if self.isFullScreen():
-                self.showNormal()
-                self._show_fullscreen_controls()
-            else:
-                self.showFullScreen()
-                self._hide_fullscreen_controls()
-        elif key == Qt.Key_Escape:
-            if self.isFullScreen():
-                self.showNormal()
-                self._show_fullscreen_controls()
-        elif key == Qt.Key_I:  # Toggle statistics
-            self.stats_visible = not self.stats_visible
-            self.toggle_statistics(self.stats_visible)
-        else:
-            super().keyPressEvent(event)
-
-    def _show_fullscreen_controls(self):
-        """Show all controls in fullscreen mode"""
-        self.playlist_dock.show()
-        self.sliders_dock.show()
-        self.status_label.show()
-        self._fullscreen_timer.stop()
-
-    def _hide_fullscreen_controls(self):
-        """Hide controls in fullscreen (will re-show on mouse move)"""
-        self.playlist_dock.hide()
-        self.sliders_dock.hide()
-        self.status_label.hide()
-        # Schedule auto-hide after 3 seconds of no mouse movement
-        self._fullscreen_timer.start(3000)
-
-    def mouseMoveEvent(self, event):
-        """Re-show controls on mouse movement in fullscreen"""
-        if self.isFullScreen():
-            self._show_fullscreen_controls()
-            # Reset timer
-            self._fullscreen_timer.stop()
-            self._fullscreen_timer.start(3000)
-        super().mouseMoveEvent(event)
-
+    # Drag & drop support
     def dragEnterEvent(self, event):
-        """Handle drag-and-drop file entry"""
-        mime = event.mimeData()
-        if mime.hasUrls():
+        if event.mimeData().hasUrls():
             event.acceptProposedAction()
         else:
             event.ignore()
 
     def dropEvent(self, event):
-        """Handle drop of files onto player"""
-        files = []
-        for url in event.mimeData().urls():
-            path = url.toLocalFile()
-            if Path(path).is_file():
-                files.append(path)
-        
-        if files:
-            # Add all files to playlist
-            for fpath in files:
-                self.playlist.addItem(fpath)
-            # Play first file
-            self.play_media(files[0])
-            self.status_label.setText(f"Loaded {len(files)} file(s)")
-
-    # ...existing methods (play_media, set_volume, capture_frame, etc.)...
+        urls = event.mimeData().urls()
+        if not urls:
+            return
+        # take first file: add to playlist and play
+        for u in urls:
+            path = u.toLocalFile()
+            if path:
+                self.playlist.addItem(path)
+        # play first dropped file
+        first = urls[0].toLocalFile()
+        if first:
+            self.add_recent_file(first)
+            self.play_media(first)

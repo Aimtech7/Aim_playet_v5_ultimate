@@ -1,0 +1,14 @@
+{
+  "theme": "dark",
+  "default_volume": 80,
+  "window_geometry": {
+    "x": 50,
+    "y": 50,
+    "width": 1200,
+    "height": 720
+  },
+  "recent_files_max": 10,
+  "eq_preset": "flat",
+  "auto_play_on_load": true,
+  "remember_position": false
+}
