@@ -13,6 +13,13 @@ import pyaudio
 from av_engine import AudioEngine, VideoEngine
 from utils.subtitles import SubtitleParser
 
+# add optional VLC support
+try:
+    import vlc
+    _HAS_VLC = True
+except Exception:
+    _HAS_VLC = False
+
 class SubtitleOverlay(QLabel):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -140,6 +147,9 @@ class AIMPlayer(QMainWindow):
         self.audio_engine = None
         self.video_engine = None
         self.current_file = None
+        # VLC player handles audio playback when available
+        self.vlc_instance = vlc.Instance() if _HAS_VLC else None
+        self.vlc_player = None
         # Central video layout
         central = QWidget()
         self.setCentralWidget(central)
@@ -266,9 +276,30 @@ class AIMPlayer(QMainWindow):
                 self.video_engine.stop()
         except:
             pass
+        # stop/cleanup previous vlc player
+        try:
+            if self.vlc_player:
+                try:
+                    self.vlc_player.stop()
+                except:
+                    pass
+                self.vlc_player = None
+        except:
+            pass
+
         self.audio_engine = AudioEngine(path)
         self.visualizer.audio_engine = self.audio_engine
         self.video_engine = VideoEngine(path)
+
+        # create VLC media player for audio/video if available
+        if _HAS_VLC:
+            try:
+                # use MediaPlayer directly with file path (VLC will handle audio)
+                self.vlc_player = vlc.MediaPlayer(path)
+            except Exception as e:
+                print("VLC media player creation failed:", e)
+                self.vlc_player = None
+
         # connect signals
         try:
             if hasattr(self.video_engine, 'frame_time_signal'):
@@ -280,6 +311,7 @@ class AIMPlayer(QMainWindow):
                 self.video_engine.frame_signal.connect(self.update_frame)
         except Exception as e:
             print(f"Warning: Could not connect frame_signal: {e}")
+
         # display first frame
         try:
             frame = self.video_engine.grab_frame()
@@ -289,8 +321,8 @@ class AIMPlayer(QMainWindow):
                 self.video_display.setPixmap(QPixmap.fromImage(img).scaled(self.video_display.size(), Qt.KeepAspectRatio))
         except Exception as e:
             print(f"Warning: Could not grab initial frame: {e}")
-        # prepare audio visualizer and engines but don't start until user presses play
-        # set seek slider maximum based on duration if possible
+
+        # set duration info if possible (used by seek)
         try:
             fps = self.video_engine.cap.get(cv2.CAP_PROP_FPS) or 30.0
             frames = self.video_engine.cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
@@ -298,13 +330,22 @@ class AIMPlayer(QMainWindow):
             self._duration = max(duration, 0.0)
         except:
             self._duration = 0.0
+
         # start playback automatically
         self.start_playback()
 
     def start_playback(self):
         try:
-            if self.video_engine:
+            # start video engine only if not already running
+            if self.video_engine and not getattr(self.video_engine, "running", False):
                 self.video_engine.start()
+            # start VLC player if available
+            if self.vlc_player:
+                try:
+                    self.vlc_player.play()
+                except Exception as e:
+                    print("VLC play failed:", e)
+            # start simulated audio spectrum (kept running regardless to drive visualizer)
             if self.audio_engine:
                 self.audio_engine.start_stream()
             self.play_btn.setText("Pause")
@@ -314,7 +355,35 @@ class AIMPlayer(QMainWindow):
     def toggle_play(self):
         if not self.video_engine:
             return
-        # if running -> pause; else start
+        # If VLC is available prefer its state to determine action
+        if self.vlc_player:
+            try:
+                if self.vlc_player.is_playing():
+                    try:
+                        self.vlc_player.pause()
+                    except Exception as e:
+                        print("VLC pause failed:", e)
+                    # pause local video loop too
+                    try:
+                        self.video_engine.pause()
+                    except:
+                        pass
+                    self.play_btn.setText("Play")
+                else:
+                    try:
+                        self.vlc_player.play()
+                    except Exception as e:
+                        print("VLC resume failed:", e)
+                    # resume video loop
+                    try:
+                        self.video_engine.start()
+                    except:
+                        pass
+                    self.play_btn.setText("Pause")
+            except Exception as e:
+                print("VLC toggle error:", e)
+            return
+        # Fallback when VLC not present: toggle VideoEngine and simulated audio
         if getattr(self.video_engine, 'running', False):
             try:
                 self.video_engine.pause()
@@ -333,16 +402,26 @@ class AIMPlayer(QMainWindow):
                 print("Error resuming:", e)
 
     def stop_playback(self):
+        # stop video engine
         if self.video_engine:
             try:
                 self.video_engine.stop()
             except:
                 pass
+        # stop simulated audio
         if self.audio_engine:
             try:
                 self.audio_engine.stop_stream()
             except:
                 pass
+        # stop vlc if present
+        if self.vlc_player:
+            try:
+                self.vlc_player.stop()
+            except:
+                pass
+            # optionally release player object
+            self.vlc_player = None
         self.play_btn.setText("Play")
 
     def update_frame(self, frame):
@@ -383,11 +462,17 @@ class AIMPlayer(QMainWindow):
         v = self.seek_slider.value()
         if hasattr(self, '_duration') and self._duration > 0:
             sec = (v/1000.0) * self._duration
+            # seek video capture (OpenCV)
             try:
                 self.video_engine.cap.set(cv2.CAP_PROP_POS_MSEC, sec*1000.0)
             except Exception as e:
-                print("Seek failed:", e)
-
+                print("Seek failed for video:", e)
+            # seek vlc if available (set_time expects milliseconds)
+            if self.vlc_player:
+                try:
+                    self.vlc_player.set_time(int(sec*1000.0))
+                except Exception as e:
+                    print("VLC seek failed:", e)
     def eq_changed(self):
         if self.audio_engine:
             vals = [s.value() for s in self.eq_sliders]
