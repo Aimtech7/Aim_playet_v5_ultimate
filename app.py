@@ -17,6 +17,9 @@ from PyQt5.QtGui import QIcon, QPixmap, QImage, QPainter, QColor
 import pyaudio
 from av_engine import AudioEngine, VideoEngine
 from utils.subtitles import SubtitleParser
+import json
+from pathlib import Path
+from datetime import datetime
 
 # add optional VLC support
 try:
@@ -141,6 +144,45 @@ class MiniPlayer(QMainWindow):
         self.video_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.video_label)
 
+class FileInfoDialog(QDialog):
+    """Display media file information"""
+    def __init__(self, path, video_engine=None):
+        super().__init__()
+        self.setWindowTitle("File Information")
+        self.setGeometry(400, 300, 500, 300)
+        layout = QVBoxLayout()
+        
+        # basic info
+        try:
+            fsize = Path(path).stat().st_size / (1024*1024)  # MB
+            cdate = datetime.fromtimestamp(Path(path).stat().st_ctime).strftime("%Y-%m-%d %H:%M:%S")
+        except:
+            fsize, cdate = 0, "N/A"
+        
+        fname = Path(path).name
+        layout.addWidget(QLabel(f"<b>Filename:</b> {fname}"))
+        layout.addWidget(QLabel(f"<b>File Size:</b> {fsize:.2f} MB"))
+        layout.addWidget(QLabel(f"<b>Created:</b> {cdate}"))
+        
+        # video info from VideoEngine
+        if video_engine:
+            try:
+                w = int(video_engine.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                h = int(video_engine.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                fps = video_engine.cap.get(cv2.CAP_PROP_FPS) or 0
+                frames = int(video_engine.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                duration = frames / fps if fps else 0
+                layout.addWidget(QLabel(f"<b>Resolution:</b> {w}×{h}"))
+                layout.addWidget(QLabel(f"<b>FPS:</b> {fps:.2f}"))
+                layout.addWidget(QLabel(f"<b>Duration:</b> {duration:.1f}s ({int(duration//60)}m {int(duration%60)}s)"))
+            except:
+                pass
+        
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.close)
+        layout.addWidget(close_btn)
+        self.setLayout(layout)
+
 class AIMPlayer(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -152,6 +194,10 @@ class AIMPlayer(QMainWindow):
         self.audio_engine = None
         self.video_engine = None
         self.current_file = None
+        self.current_playlist_index = -1  # track current item in playlist
+        self.repeat_mode = 0  # 0=off, 1=one, 2=all
+        self.shuffle_enabled = False
+        self.playback_speed = 1.0
         # VLC player handles audio playback when available
         self.vlc_instance = vlc.Instance() if _HAS_VLC else None
         self.vlc_player = None
@@ -183,22 +229,50 @@ class AIMPlayer(QMainWindow):
         # Visualizer
         self.visualizer = VisualizerWidget(None)
         self.vlay.addWidget(self.visualizer)
-        # Controls bar (play/pause, stop, seek, volume)
+        # Controls bar (play/pause, stop, seek, volume, speed)
         ctrl = QWidget()
         ctrl_layout = QHBoxLayout(ctrl)
         self.play_btn = QPushButton("Play")
         self.stop_btn = QPushButton("Stop")
-        # keep transport buttons compact so they remain visible
+        self.prev_btn = QPushButton("◄◄")  # Previous
+        self.next_btn = QPushButton("►►")  # Next
+        self.repeat_btn = QPushButton("Repeat: Off")
+        self.shuffle_btn = QPushButton("Shuffle: Off")
+        # keep transport buttons compact
         self.play_btn.setFixedWidth(80)
         self.stop_btn.setFixedWidth(80)
-        self.seek_slider = QSlider(Qt.Horizontal); self.seek_slider.setRange(0,1000)
-        self.vol_slider = QSlider(Qt.Horizontal); self.vol_slider.setRange(0,100); self.vol_slider.setValue(80)
+        self.prev_btn.setFixedWidth(50)
+        self.next_btn.setFixedWidth(50)
+        self.repeat_btn.setFixedWidth(100)
+        self.shuffle_btn.setFixedWidth(100)
+        # speed slider
+        self.speed_slider = QSlider(Qt.Horizontal)
+        self.speed_slider.setRange(5, 20)  # 0.5x to 2.0x (multiply by 0.1)
+        self.speed_slider.setValue(10)  # 1.0x
+        self.speed_slider.setMaximumWidth(80)
+        self.speed_label = QLabel("1.0x")
+        self.speed_label.setFixedWidth(30)
+        # seek and volume sliders
+        self.seek_slider = QSlider(Qt.Horizontal)
+        self.seek_slider.setRange(0,1000)
+        self.vol_slider = QSlider(Qt.Horizontal)
+        self.vol_slider.setRange(0,100)
+        self.vol_slider.setValue(80)
+        # add to layout
+        ctrl_layout.addWidget(self.prev_btn)
         ctrl_layout.addWidget(self.play_btn)
         ctrl_layout.addWidget(self.stop_btn)
+        ctrl_layout.addWidget(self.next_btn)
+        ctrl_layout.addWidget(self.repeat_btn)
+        ctrl_layout.addWidget(self.shuffle_btn)
+        ctrl_layout.addWidget(QLabel("Speed:"))
+        ctrl_layout.addWidget(self.speed_slider)
+        ctrl_layout.addWidget(self.speed_label)
         ctrl_layout.addWidget(self.seek_slider, 1)
         ctrl_layout.addWidget(self.vol_slider)
-        # connect volume changes
+        # connect signals
         self.vol_slider.valueChanged.connect(self.set_volume)
+        self.speed_slider.valueChanged.connect(self.set_playback_speed)
         self.vlay.addWidget(ctrl)
         # small status label for playback state/time
         self.status_label = QLabel("Ready")
@@ -206,6 +280,10 @@ class AIMPlayer(QMainWindow):
         self.vlay.addWidget(self.status_label)
         self.play_btn.clicked.connect(self.toggle_play)
         self.stop_btn.clicked.connect(self.stop_playback)
+        self.prev_btn.clicked.connect(self.play_previous)
+        self.next_btn.clicked.connect(self.play_next)
+        self.repeat_btn.clicked.connect(self.cycle_repeat)
+        self.shuffle_btn.clicked.connect(self.toggle_shuffle)
         self.seek_slider.sliderReleased.connect(self.seek_to_slider)
         # Sliders area (left dock)
         self.sliders_dock = QDockWidget("Sliders", self)
@@ -244,6 +322,10 @@ class AIMPlayer(QMainWindow):
         media = mb.addMenu("Media")
         openf = QAction("Open File", self); openf.triggered.connect(self.open_file)
         media.addAction(openf)
+        # Recent files submenu
+        self.recent_menu = media.addMenu("Recent Files")
+        self.update_recent_menu()
+        media.addSeparator()
         playback = mb.addMenu("Playback")
         play = QAction("Play/Pause", self); play.triggered.connect(self.toggle_play)
         playback.addAction(play)
@@ -260,6 +342,10 @@ class AIMPlayer(QMainWindow):
         tools.addAction(skin)
         lut = QAction("Select LUT", self); lut.triggered.connect(self.open_lut)
         tools.addAction(lut)
+        info = QAction("File Information", self); info.triggered.connect(self.open_file_info)
+        tools.addAction(info)
+        capture = QAction("Capture Frame", self); capture.triggered.connect(self.capture_frame)
+        tools.addAction(capture)
         bookmarks = mb.addMenu("Bookmarks")
         bm = QAction("Manage Bookmarks", self); bm.triggered.connect(self.open_bookmarks)
         bookmarks.addAction(bm)
@@ -269,6 +355,96 @@ class AIMPlayer(QMainWindow):
     def open_file(self):
         f,_ = QFileDialog.getOpenFileName(self,"Open media","","Media files (*.mp4 *.mkv *.mp3 *.wav *.ogg)")
         if f:
+            self.add_recent_file(f)  # track in recent files
+            self.playlist.addItem(f)
+            self.play_media(f)
+
+    def add_recent_file(self, path):
+        """Add file to recent list (max 10 items)"""
+        # remove if already in list
+        if path in self.recent_files:
+            self.recent_files.remove(path)
+        # add to front
+        self.recent_files.insert(0, path)
+        # keep only 10 most recent
+        self.recent_files = self.recent_files[:10]
+        # save to file
+        self.save_recent_files()
+        # update menu
+        self.update_recent_menu()
+
+    def update_recent_menu(self):
+        """Rebuild recent files menu"""
+        self.recent_menu.clear()
+        if not self.recent_files:
+            self.recent_menu.addAction("(empty)")
+            return
+        for i, fpath in enumerate(self.recent_files):
+            fname = Path(fpath).name
+            action = QAction(f"{i+1}. {fname}", self)
+            action.triggered.connect(lambda _, p=fpath: self.play_recent(p))
+            self.recent_menu.addAction(action)
+
+    def play_recent(self, path):
+        """Play file from recent menu"""
+        if Path(path).exists():
+            self.play_media(path)
+        else:
+            # remove non-existent file
+            self.recent_files.remove(path)
+            self.save_recent_files()
+            self.update_recent_menu()
+
+    def save_recent_files(self):
+        """Save recent files list to JSON"""
+        try:
+            with open(self.recent_files_path, 'w') as f:
+                json.dump(self.recent_files, f)
+        except Exception as e:
+            print(f"Failed to save recent files: {e}")
+
+    def load_recent_files(self):
+        """Load recent files list from JSON"""
+        try:
+            if self.recent_files_path.exists():
+                with open(self.recent_files_path, 'r') as f:
+                    self.recent_files = json.load(f)
+        except Exception as e:
+            print(f"Failed to load recent files: {e}")
+            self.recent_files = []
+
+    def open_file_info(self):
+        """Open file info dialog for current file"""
+        if not self.current_file:
+            QInputDialog.getText(self, "Info", "No file loaded")
+            return
+        dlg = FileInfoDialog(self.current_file, self.video_engine)
+        dlg.exec_()
+
+    def capture_frame(self):
+        """Save current video frame as PNG"""
+        if not self.video_engine or not self.current_file:
+            return
+        try:
+            frame = self.video_engine.grab_frame()
+            if frame is None:
+                return
+            # create filename: original_name_TIMESTAMP.png
+            base = Path(self.current_file).stem
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output = Path(self.current_file).parent / f"{base}_capture_{ts}.png"
+            # save frame (BGR to RGB for PNG)
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            cv2.imwrite(str(output), cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
+            self.status_label.setText(f"Frame captured: {output.name}")
+        except Exception as e:
+            print(f"Capture failed: {e}")
+            self.status_label.setText("Capture failed")
+
+    def open_file(self):
+        f,_ = QFileDialog.getOpenFileName(self,"Open media","","Media files (*.mp4 *.mkv *.mp3 *.wav *.ogg)")
+        if f:
+            self.add_recent_file(f)  # track in recent files
             self.playlist.addItem(f)
             self.play_media(f)
     def play_item(self, item):
@@ -450,6 +626,12 @@ class AIMPlayer(QMainWindow):
             self.vlc_player = None
         self.play_btn.setText("Play")
         self.status_label.setText("Stopped")
+        # check if repeat mode is "One" and restart same track
+        if self.repeat_mode == 1:  # repeat one
+            try:
+                self.play_media(self.current_file)
+            except:
+                pass
 
     def update_frame(self, frame):
         # frame is BGR numpy array
@@ -569,8 +751,107 @@ class AIMPlayer(QMainWindow):
             except Exception:
                 pass
 
-if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    win = AIMPlayer()
-    win.show()
-    sys.exit(app.exec_())
+    def keyPressEvent(self, event):
+        """Handle keyboard shortcuts"""
+        key = event.key()
+        if key == Qt.Key_Space:
+            self.toggle_play()
+        elif key == Qt.Key_Left:
+            self.seek_relative(-5.0)  # seek back 5s
+        elif key == Qt.Key_Right:
+            self.seek_relative(5.0)  # seek forward 5s
+        elif key == Qt.Key_Up:
+            self.vol_slider.setValue(min(100, self.vol_slider.value() + 5))
+        elif key == Qt.Key_Down:
+            self.vol_slider.setValue(max(0, self.vol_slider.value() - 5))
+        elif key == Qt.Key_M:
+            # mute/unmute: store previous volume
+            if not hasattr(self, '_muted_vol'):
+                self._muted_vol = self.vol_slider.value()
+                self.vol_slider.setValue(0)
+            else:
+                self.vol_slider.setValue(self._muted_vol)
+                del self._muted_vol
+        elif key == Qt.Key_F:
+            # toggle fullscreen
+            if self.isFullScreen():
+                self.showNormal()
+            else:
+                self.showFullScreen()
+        elif key == Qt.Key_Escape:
+            if self.isFullScreen():
+                self.showNormal()
+        else:
+            super().keyPressEvent(event)
+
+    def seek_relative(self, delta):
+        """Seek relative to current position"""
+        if not self.video_engine or self._duration <= 0:
+            return
+        try:
+            current = self.video_engine.get_time()
+            target = max(0, min(self._duration, current + delta))
+            # seek video
+            self.video_engine.cap.set(cv2.CAP_PROP_POS_MSEC, target*1000.0)
+            # seek vlc if available
+            if self.vlc_player:
+                try:
+                    self.vlc_player.set_time(int(target*1000.0))
+                except:
+                    pass
+            self.status_label.setText(f"Seek to {target:.1f}s")
+        except:
+            pass
+
+    def play_next(self):
+        """Play next item in playlist"""
+        if self.playlist.count() == 0:
+            return
+        if self.shuffle_enabled:
+            import random
+            idx = random.randint(0, self.playlist.count() - 1)
+        else:
+            idx = (self.current_playlist_index + 1) % self.playlist.count()
+        self.current_playlist_index = idx
+        item = self.playlist.item(idx)
+        self.play_item(item)
+
+    def play_previous(self):
+        """Play previous item in playlist"""
+        if self.playlist.count() == 0:
+            return
+        idx = (self.current_playlist_index - 1) % self.playlist.count()
+        self.current_playlist_index = idx
+        item = self.playlist.item(idx)
+        self.play_item(item)
+
+    def cycle_repeat(self):
+        """Cycle through repeat modes: Off -> One -> All -> Off"""
+        self.repeat_mode = (self.repeat_mode + 1) % 3
+        modes = ["Off", "One", "All"]
+        self.repeat_btn.setText(f"Repeat: {modes[self.repeat_mode]}")
+
+    def toggle_shuffle(self):
+        """Toggle shuffle mode"""
+        self.shuffle_enabled = not self.shuffle_enabled
+        state = "On" if self.shuffle_enabled else "Off"
+        self.shuffle_btn.setText(f"Shuffle: {state}")
+
+    def set_playback_speed(self, val):
+        """Set playback speed (val: 5-20, multiply by 0.1 to get 0.5x-2.0x)"""
+        self.playback_speed = val * 0.1
+        self.speed_label.setText(f"{self.playback_speed:.1f}x")
+        # if VLC available, apply speed
+        if self.vlc_player:
+            try:
+                self.vlc_player.set_rate(self.playback_speed)
+            except:
+                pass
+        # TODO: implement speed control for VideoEngine (requires audio resampling)
+
+    def play_item(self, item):
+        """Play item from playlist (override to track index)"""
+        idx = self.playlist.row(item)
+        if idx >= 0:
+            self.current_playlist_index = idx
+        self.play_media(item.text())
