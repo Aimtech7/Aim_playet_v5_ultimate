@@ -2,10 +2,11 @@
 # AIM Player v5 Ultimate — Integrated PyQt5 application (simplified production bundle)
 # Note: This is a functional scaffold assembled from the project conversation.
 import sys, os, random, numpy as np
+import cv2
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QAction, QMenu,
                              QFileDialog, QVBoxLayout, QHBoxLayout, QSlider, QPushButton,
                              QListWidget, QDockWidget, QListWidgetItem, QInputDialog, QDialog,
-                             QColorDialog)
+                             QColorDialog, QToolBar)
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject
 from PyQt5.QtGui import QIcon, QPixmap, QImage, QPainter, QColor
 import pyaudio
@@ -18,6 +19,9 @@ class SubtitleOverlay(QLabel):
         self.setStyleSheet("color:white; background-color:transparent; font-size:18px;")
         self.setAlignment(Qt.AlignBottom | Qt.AlignHCenter)
         self.subs_tracks = []
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        # ensure fully translucent background on systems that need the flag
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
     def load(self, path):
         sp = SubtitleParser(path)
         self.subs_tracks.append(sp)
@@ -140,9 +144,20 @@ class AIMPlayer(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         self.vlay = QVBoxLayout(central)
+        # create a video container so overlay can be parented to it
+        self.video_container = QWidget()
+        self.video_container.setMinimumHeight(360)
+        self.video_container_layout = QVBoxLayout(self.video_container)
         self.video_display = QLabel("No video loaded")
         self.video_display.setAlignment(Qt.AlignCenter)
-        self.vlay.addWidget(self.video_display)
+        # make video area clearly visible so controls are not hidden visually
+        self.video_display.setStyleSheet("background-color:black; color:white;")
+        self.video_display.setMinimumSize(640, 360)
+        self.video_display.setScaledContents(False)
+        self.video_container_layout.addWidget(self.video_display)
+        self.vlay.addWidget(self.video_container)
+        # subtitle overlay (will be shown on top of video_display)
+        self.subtitle_overlay = None
         # Playlist
         self.playlist_dock = QDockWidget("Playlist", self)
         self.playlist = QListWidget()
@@ -153,6 +168,24 @@ class AIMPlayer(QMainWindow):
         # Visualizer
         self.visualizer = VisualizerWidget(None)
         self.vlay.addWidget(self.visualizer)
+        # Controls bar (play/pause, stop, seek, volume)
+        ctrl = QWidget()
+        ctrl_layout = QHBoxLayout(ctrl)
+        self.play_btn = QPushButton("Play")
+        self.stop_btn = QPushButton("Stop")
+        # keep transport buttons compact so they remain visible
+        self.play_btn.setFixedWidth(80)
+        self.stop_btn.setFixedWidth(80)
+        self.seek_slider = QSlider(Qt.Horizontal); self.seek_slider.setRange(0,1000)
+        self.vol_slider = QSlider(Qt.Horizontal); self.vol_slider.setRange(0,100); self.vol_slider.setValue(80)
+        ctrl_layout.addWidget(self.play_btn)
+        ctrl_layout.addWidget(self.stop_btn)
+        ctrl_layout.addWidget(self.seek_slider, 1)
+        ctrl_layout.addWidget(self.vol_slider)
+        self.vlay.addWidget(ctrl)
+        self.play_btn.clicked.connect(self.toggle_play)
+        self.stop_btn.clicked.connect(self.stop_playback)
+        self.seek_slider.sliderReleased.connect(self.seek_to_slider)
         # Sliders area (left dock)
         self.sliders_dock = QDockWidget("Sliders", self)
         sbox = QWidget()
@@ -179,13 +212,20 @@ class AIMPlayer(QMainWindow):
         self.addDockWidget(Qt.LeftDockWidgetArea, self.sliders_dock)
         # menus
         self.init_menus()
+        # position timer to update seek slider
+        self.position_timer = QTimer()
+        self.position_timer.setInterval(200)
+        self.position_timer.timeout.connect(self._update_seek)
+        self.position_timer.start()
+
     def init_menus(self):
         mb = self.menuBar()
         media = mb.addMenu("Media")
         openf = QAction("Open File", self); openf.triggered.connect(self.open_file)
         media.addAction(openf)
         playback = mb.addMenu("Playback")
-        play = QAction("Play/Pause", self); playback.addAction(play)
+        play = QAction("Play/Pause", self); play.triggered.connect(self.toggle_play)
+        playback.addAction(play)
         audio = mb.addMenu("Audio")
         ai_eq = QAction("AI Auto-EQ", self, checkable=True); ai_eq.triggered.connect(self.toggle_ai_eq)
         audio.addAction(ai_eq)
@@ -215,34 +255,144 @@ class AIMPlayer(QMainWindow):
     def play_media(self, path):
         self.current_file = path
         # initialize engines
+        # stop previous
+        try:
+            if self.audio_engine:
+                self.audio_engine.stop_stream()
+        except:
+            pass
+        try:
+            if self.video_engine:
+                self.video_engine.stop()
+        except:
+            pass
         self.audio_engine = AudioEngine(path)
         self.visualizer.audio_engine = self.audio_engine
         self.video_engine = VideoEngine(path)
-        # connect video frame updates for subtitle timing
-        if hasattr(self.video_engine, 'frame_time_signal'):
-            try:
+        # connect signals
+        try:
+            if hasattr(self.video_engine, 'frame_time_signal'):
                 self.video_engine.frame_time_signal.connect(self.on_frame_time)
-            except Exception as e:
-                print(f"Warning: Could not connect frame_time_signal: {e}")
+        except Exception as e:
+            print(f"Warning: Could not connect frame_time_signal: {e}")
+        try:
+            if hasattr(self.video_engine, 'frame_signal'):
+                self.video_engine.frame_signal.connect(self.update_frame)
+        except Exception as e:
+            print(f"Warning: Could not connect frame_signal: {e}")
         # display first frame
         try:
             frame = self.video_engine.grab_frame()
             if frame is not None:
                 h,w,c = frame.shape
                 img = QImage(frame.data, w, h, 3*w, QImage.Format_RGB888).rgbSwapped()
-                self.video_display.setPixmap(QPixmap.fromImage(img).scaled(800,450, Qt.KeepAspectRatio))
+                self.video_display.setPixmap(QPixmap.fromImage(img).scaled(self.video_display.size(), Qt.KeepAspectRatio))
         except Exception as e:
             print(f"Warning: Could not grab initial frame: {e}")
-        # start playback loops
+        # prepare audio visualizer and engines but don't start until user presses play
+        # set seek slider maximum based on duration if possible
         try:
-            self.video_engine.start()
-            self.audio_engine.start_stream()
+            fps = self.video_engine.cap.get(cv2.CAP_PROP_FPS) or 30.0
+            frames = self.video_engine.cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
+            duration = (frames / fps) if fps else 0
+            self._duration = max(duration, 0.0)
+        except:
+            self._duration = 0.0
+        # start playback automatically
+        self.start_playback()
+
+    def start_playback(self):
+        try:
+            if self.video_engine:
+                self.video_engine.start()
+            if self.audio_engine:
+                self.audio_engine.start_stream()
+            self.play_btn.setText("Pause")
         except Exception as e:
-            print(f"Error starting playback: {e}")
+            print("Error starting playback:", e)
+
+    def toggle_play(self):
+        if not self.video_engine:
+            return
+        # if running -> pause; else start
+        if getattr(self.video_engine, 'running', False):
+            try:
+                self.video_engine.pause()
+                if self.audio_engine:
+                    self.audio_engine.stop_stream()
+                self.play_btn.setText("Play")
+            except Exception as e:
+                print("Error pausing:", e)
+        else:
+            try:
+                self.video_engine.start()
+                if self.audio_engine:
+                    self.audio_engine.start_stream()
+                self.play_btn.setText("Pause")
+            except Exception as e:
+                print("Error resuming:", e)
+
+    def stop_playback(self):
+        if self.video_engine:
+            try:
+                self.video_engine.stop()
+            except:
+                pass
+        if self.audio_engine:
+            try:
+                self.audio_engine.stop_stream()
+            except:
+                pass
+        self.play_btn.setText("Play")
+
+    def update_frame(self, frame):
+        # frame is BGR numpy array
+        try:
+            h,w,c = frame.shape
+            # convert BGR->RGB
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            img = QImage(rgb.data, w, h, 3*w, QImage.Format_RGB888)
+            pix = QPixmap.fromImage(img).scaled(self.video_display.size(), Qt.KeepAspectRatio)
+            self.video_display.setPixmap(pix)
+            # ensure subtitle overlay is on top and parented to video_display
+            if not self.subtitle_overlay:
+                self.subtitle_overlay = SubtitleOverlay(self.video_display)
+                self.subtitle_overlay.resize(self.video_display.size())
+                self.subtitle_overlay.move(0,0)
+                self.subtitle_overlay.raise_()
+            else:
+                self.subtitle_overlay.resize(self.video_display.size())
+                self.subtitle_overlay.move(0,0)
+        except Exception:
+            pass
+
+    def _update_seek(self):
+        if self.video_engine and hasattr(self, '_duration') and self._duration > 0:
+            try:
+                pos = self.video_engine.get_time()
+                val = int((pos / self._duration) * 1000)
+                self.seek_slider.blockSignals(True)
+                self.seek_slider.setValue(max(0, min(1000, val)))
+                self.seek_slider.blockSignals(False)
+            except:
+                pass
+
+    def seek_to_slider(self):
+        if not self.video_engine:
+            return
+        v = self.seek_slider.value()
+        if hasattr(self, '_duration') and self._duration > 0:
+            sec = (v/1000.0) * self._duration
+            try:
+                self.video_engine.cap.set(cv2.CAP_PROP_POS_MSEC, sec*1000.0)
+            except Exception as e:
+                print("Seek failed:", e)
+
     def eq_changed(self):
         if self.audio_engine:
             vals = [s.value() for s in self.eq_sliders]
             self.audio_engine.set_eq(vals)
+
     def video_filters_changed(self):
         if self.video_engine:
             self.video_engine.set_brightness(self.bright.value()/50.0)
@@ -253,10 +403,13 @@ class AIMPlayer(QMainWindow):
             self.audio_engine.toggle_ai_eq(checked)
     def load_sub(self):
         f,_ = QFileDialog.getOpenFileName(self,"Load subtitle","","Subs (*.srt *.ass *.vtt)")
-        if f and self.video_engine:
-            if not hasattr(self, 'subtitle_overlay'):
+        if f and self.video_display:
+            # parent overlay to video_display so it sits above video
+            if not self.subtitle_overlay:
                 self.subtitle_overlay = SubtitleOverlay(self.video_display)
-                self.vlay.addWidget(self.subtitle_overlay)
+                self.subtitle_overlay.resize(self.video_display.size())
+                self.subtitle_overlay.move(0,0)
+                self.subtitle_overlay.raise_()
             self.subtitle_overlay.load(f)
     def open_bookmarks(self):
         if self.video_engine:
