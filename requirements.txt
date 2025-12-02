@@ -1,0 +1,7 @@
+PyQt5
+numpy
+opencv-python
+pyaudio
+pysubs2
+torch
+ffmpeg-python
